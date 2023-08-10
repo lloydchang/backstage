@@ -2,7 +2,7 @@ name: Automate staleness
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/10 * * * *' # run every 10 minutes as it also removes labels.
+#    - cron: '*/10 * * * *' # run every 10 minutes as it also removes labels.
 
 jobs:
   stale:
