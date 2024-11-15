@@ -33,6 +33,11 @@ import {
   OwnerPicker,
   OwnerPickerSchema,
 } from './components/fields/OwnerPicker/OwnerPicker';
+import {
+  MultiEntityPicker,
+  MultiEntityPickerSchema,
+  validateMultiEntityPickerValidation,
+} from './components/fields/MultiEntityPicker/MultiEntityPicker';
 import { repoPickerValidation } from './components/fields/RepoUrlPicker';
 import {
   RepoUrlPicker,
@@ -63,11 +68,16 @@ import {
   scaffolderListTaskRouteRef,
   actionsRouteRef,
   editRouteRef,
+  editorRouteRef,
+  customFieldsRouteRef,
+  templateFormRouteRef,
 } from './routes';
 import {
   MyGroupsPicker,
   MyGroupsPickerSchema,
 } from './components/fields/MyGroupsPicker/MyGroupsPicker';
+import { RepoBranchPicker } from './components/fields/RepoBranchPicker/RepoBranchPicker';
+import { RepoBranchPickerSchema } from './components/fields/RepoBranchPicker/schema';
 
 /**
  * The main plugin export for the scaffolder.
@@ -100,6 +110,9 @@ export const scaffolderPlugin = createPlugin({
     actions: actionsRouteRef,
     listTasks: scaffolderListTaskRouteRef,
     edit: editRouteRef,
+    editor: editorRouteRef,
+    customFields: customFieldsRouteRef,
+    templateForm: templateFormRouteRef,
   },
   externalRoutes: {
     registerComponent: registerComponentRouteRef,
@@ -131,6 +144,20 @@ export const EntityNamePickerFieldExtension = scaffolderPlugin.provide(
     name: 'EntityNamePicker',
     validation: entityNamePickerValidation,
     schema: EntityNamePickerSchema,
+  }),
+);
+
+/**
+ * A field extension for selecting multiple entities that exists in the Catalog.
+ *
+ * @public
+ */
+export const MultiEntityPickerFieldExtension = scaffolderPlugin.provide(
+  createScaffolderFieldExtension({
+    component: MultiEntityPicker,
+    name: 'MultiEntityPicker',
+    schema: MultiEntityPickerSchema,
+    validation: validateMultiEntityPickerValidation,
   }),
 );
 
@@ -214,13 +241,14 @@ export const EntityTagsPickerFieldExtension = scaffolderPlugin.provide(
 );
 
 /**
- * @alpha
- * The Router and main entrypoint to the Alpha Scaffolder plugin.
+ * A field extension to select a branch from a repository.
+ *
+ * @public
  */
-export const NextScaffolderPage = scaffolderPlugin.provide(
-  createRoutableExtension({
-    name: 'NextScaffolderPage',
-    component: () => import('./next/Router').then(m => m.Router),
-    mountPoint: rootRouteRef,
+export const RepoBranchPickerFieldExtension = scaffolderPlugin.provide(
+  createScaffolderFieldExtension({
+    component: RepoBranchPicker,
+    name: 'RepoBranchPicker',
+    schema: RepoBranchPickerSchema,
   }),
 );

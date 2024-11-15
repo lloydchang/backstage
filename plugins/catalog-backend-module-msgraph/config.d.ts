@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { TaskScheduleDefinitionConfig } from '@backstage/backend-tasks';
+import { SchedulerServiceTaskScheduleDefinitionConfig } from '@backstage/backend-plugin-api';
 
 export interface Config {
   catalog?: {
@@ -160,6 +160,11 @@ export interface Config {
                * E.g. "accountEnabled eq true and userType eq 'member'"
                */
               filter?: string;
+              /**
+               * Set to false to not load user photos.
+               * This can be useful for huge organizations.
+               */
+              loadPhotos?: boolean;
             };
 
             group?: {
@@ -187,6 +192,11 @@ export interface Config {
                * E.g. ["id", "displayName", "description"]
                */
               select?: string[];
+              /**
+               * Whether to ingest groups that are members of the found/filtered/searched groups.
+               * Default value is `false`.
+               */
+              includeSubGroups?: boolean;
             };
 
             userGroupMember?: {
@@ -207,7 +217,7 @@ export interface Config {
             /**
              * (Optional) TaskScheduleDefinition for the refresh.
              */
-            schedule?: TaskScheduleDefinitionConfig;
+            schedule?: SchedulerServiceTaskScheduleDefinitionConfig;
           }
         | {
             [name: string]: {
@@ -294,7 +304,7 @@ export interface Config {
               /**
                * (Optional) TaskScheduleDefinition for the refresh.
                */
-              schedule?: TaskScheduleDefinitionConfig;
+              schedule?: SchedulerServiceTaskScheduleDefinitionConfig;
             };
           };
     };

@@ -15,8 +15,11 @@
  */
 
 import { InputError } from '@backstage/errors';
-import { EntitiesSearchFilter, EntityFilter } from '../../catalog';
 import { parseStringsParam } from './common';
+import {
+  EntitiesSearchFilter,
+  EntityFilter,
+} from '@backstage/plugin-catalog-node';
 
 /**
  * Parses the filtering part of a query, like
@@ -57,7 +60,7 @@ export function parseEntityFilterString(
     return undefined;
   }
 
-  const filtersByKey: Record<string, EntitiesSearchFilter> = {};
+  const filtersByKey = new Map<string, EntitiesSearchFilter>();
 
   for (const statement of statements) {
     const equalsIndex = statement.indexOf('=');
@@ -76,8 +79,11 @@ export function parseEntityFilterString(
       );
     }
 
-    const f =
-      key in filtersByKey ? filtersByKey[key] : (filtersByKey[key] = { key });
+    let f = filtersByKey.get(key);
+    if (!f) {
+      f = { key };
+      filtersByKey.set(key, f);
+    }
 
     if (value !== undefined) {
       f.values = f.values || [];
@@ -85,5 +91,5 @@ export function parseEntityFilterString(
     }
   }
 
-  return Object.values(filtersByKey);
+  return Array.from(filtersByKey.values());
 }

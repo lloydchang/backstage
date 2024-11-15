@@ -21,25 +21,22 @@ import {
 } from '@backstage/catalog-model';
 import { InputError, NotFoundError } from '@backstage/errors';
 import { Knex } from 'knex';
-import { isEqual, chunk as lodashChunk } from 'lodash';
-import { Logger } from 'winston';
+import { chunk as lodashChunk, isEqual } from 'lodash';
 import { z } from 'zod';
 import {
+  Cursor,
   EntitiesBatchRequest,
   EntitiesBatchResponse,
-  Cursor,
   EntitiesCatalog,
   EntitiesRequest,
   EntitiesResponse,
-  EntitiesSearchFilter,
   EntityAncestryResponse,
   EntityFacetsRequest,
   EntityFacetsResponse,
-  EntityFilter,
+  EntityOrder,
   EntityPagination,
   QueryEntitiesRequest,
   QueryEntitiesResponse,
-  EntityOrder,
 } from '../catalog/types';
 import {
   DbFinalEntitiesRow,
@@ -49,13 +46,17 @@ import {
   DbRelationsRow,
   DbSearchRow,
 } from '../database/tables';
-
-import { Stitcher } from '../stitching/Stitcher';
+import { Stitcher } from '../stitching/types';
 
 import {
   isQueryEntitiesCursorRequest,
   isQueryEntitiesInitialRequest,
 } from './util';
+import {
+  EntitiesSearchFilter,
+  EntityFilter,
+} from '@backstage/plugin-catalog-node';
+import { LoggerService } from '@backstage/backend-plugin-api';
 
 const defaultSortField: EntityOrder = {
   field: 'metadata.uid',
@@ -189,10 +190,14 @@ function parseFilter(
 
 export class DefaultEntitiesCatalog implements EntitiesCatalog {
   private readonly database: Knex;
-  private readonly logger: Logger;
+  private readonly logger: LoggerService;
   private readonly stitcher: Stitcher;
 
-  constructor(options: { database: Knex; logger: Logger; stitcher: Stitcher }) {
+  constructor(options: {
+    database: Knex;
+    logger: LoggerService;
+    stitcher: Stitcher;
+  }) {
     this.database = options.database;
     this.logger = options.logger;
     this.stitcher = options.stitcher;
@@ -244,7 +249,12 @@ export class DefaultEntitiesCatalog implements EntitiesCatalog {
         ]);
       }
     });
-    entitiesQuery = entitiesQuery.orderBy('final_entities.entity_id', 'asc'); // stable sort
+
+    if (!request?.order) {
+      entitiesQuery = entitiesQuery.orderBy('final_entities.entity_ref', 'asc'); // default sort
+    } else {
+      entitiesQuery.orderBy('final_entities.entity_id', 'asc'); // stable sort
+    }
 
     const { limit, offset } = parsePagination(request?.pagination);
     if (limit !== undefined) {
@@ -310,16 +320,11 @@ export class DefaultEntitiesCatalog implements EntitiesCatalog {
 
     for (const chunk of lodashChunk(request.entityRefs, 200)) {
       let query = this.database<DbFinalEntitiesRow>('final_entities')
-        .innerJoin<DbRefreshStateRow>(
-          'refresh_state',
-          'refresh_state.entity_id',
-          'final_entities.entity_id',
-        )
         .select({
-          entityRef: 'refresh_state.entity_ref',
+          entityRef: 'final_entities.entity_ref',
           entity: 'final_entities.final_entity',
         })
-        .whereIn('refresh_state.entity_ref', chunk);
+        .whereIn('final_entities.entity_ref', chunk);
 
       if (request?.filter) {
         query = parseFilter(
@@ -327,7 +332,7 @@ export class DefaultEntitiesCatalog implements EntitiesCatalog {
           query,
           this.database,
           false,
-          'refresh_state.entity_id',
+          'final_entities.entity_id',
         );
       }
 
@@ -374,12 +379,20 @@ export class DefaultEntitiesCatalog implements EntitiesCatalog {
     const [prevItemOrderFieldValue, prevItemUid] =
       cursor.orderFieldValues || [];
 
-    const dbQuery = db('search')
-      .join('final_entities', 'search.entity_id', 'final_entities.entity_id')
-      .where('search.key', sortField.field);
+    const dbQuery = db('final_entities').leftOuterJoin('search', qb =>
+      qb
+        .on('search.entity_id', 'final_entities.entity_id')
+        .andOnVal('search.key', sortField.field),
+    );
 
     if (cursor.filter) {
-      parseFilter(cursor.filter, dbQuery, db, false, 'search.entity_id');
+      parseFilter(
+        cursor.filter,
+        dbQuery,
+        db,
+        false,
+        'final_entities.entity_id',
+      );
     }
 
     const normalizedFullTextFilterTerm = cursor.fullTextFilter?.term?.trim();
@@ -405,7 +418,7 @@ export class DefaultEntitiesCatalog implements EntitiesCatalog {
               `%${normalizedFullTextFilterTerm.toLocaleLowerCase('en-US')}%`,
             );
           });
-        dbQuery.andWhere('search.entity_id', 'in', matchQuery);
+        dbQuery.andWhere('final_entities.entity_id', 'in', matchQuery);
       }
     }
 
@@ -422,35 +435,68 @@ export class DefaultEntitiesCatalog implements EntitiesCatalog {
         )
           .orWhere('value', '=', prevItemOrderFieldValue)
           .andWhere(
-            'search.entity_id',
+            'final_entities.entity_id',
             isFetchingBackwards !== isOrderingDescending ? '<' : '>',
             prevItemUid,
           );
       });
     }
 
-    dbQuery
-      .orderBy([
+    if (db.client.config.client === 'pg') {
+      // pg correctly orders by the column value and handling nulls in one go
+      dbQuery.orderBy([
         {
-          column: 'value',
+          column: 'search.value',
+          order: isFetchingBackwards
+            ? invertOrder(sortField.order)
+            : sortField.order,
+          nulls: 'last',
+        },
+        {
+          column: 'final_entities.entity_id',
+          order: isFetchingBackwards
+            ? invertOrder(sortField.order)
+            : sortField.order,
+        },
+      ]);
+    } else {
+      // sqlite and mysql translate the above statement ONLY into "order by (value is null) asc"
+      // no matter what the order is, for some reason, so we have to manually add back the statement
+      // that translates to "order by value <order>" while avoiding to give an order
+      dbQuery.orderBy([
+        {
+          column: 'search.value',
+          order: undefined,
+          nulls: 'last',
+        },
+        {
+          column: 'search.value',
           order: isFetchingBackwards
             ? invertOrder(sortField.order)
             : sortField.order,
         },
         {
-          column: 'search.entity_id',
+          column: 'final_entities.entity_id',
           order: isFetchingBackwards
             ? invertOrder(sortField.order)
             : sortField.order,
         },
-      ])
-      // fetch an extra item to check if there are more items.
-      .limit(isFetchingBackwards ? limit : limit + 1);
+      ]);
+    }
 
-    countQuery.count('search.entity_id', { as: 'count' });
+    if (
+      isQueryEntitiesInitialRequest(request) &&
+      request.offset !== undefined
+    ) {
+      dbQuery.offset(request.offset);
+    }
+    // fetch an extra item to check if there are more items.
+    dbQuery.limit(isFetchingBackwards ? limit : limit + 1);
+
+    countQuery.count('final_entities.entity_id', { as: 'count' });
 
     const [rows, [{ count }]] = await Promise.all([
-      dbQuery,
+      limit > 0 ? dbQuery : [],
       // for performance reasons we invoke the countQuery
       // only on the first request.
       // The result is then embedded into the cursor
@@ -606,15 +652,14 @@ export class DefaultEntitiesCatalog implements EntitiesCatalog {
       .where('entity_id', uid)
       .delete();
 
-    await this.stitcher.stitch(new Set(relationPeers.map(p => p.ref)));
+    await this.stitcher.stitch({
+      entityRefs: new Set(relationPeers.map(p => p.ref)),
+    });
   }
 
   async entityAncestry(rootRef: string): Promise<EntityAncestryResponse> {
-    const [rootRow] = await this.database<DbRefreshStateRow>('refresh_state')
-      .leftJoin<DbFinalEntitiesRow>('final_entities', {
-        'refresh_state.entity_id': 'final_entities.entity_id',
-      })
-      .where('refresh_state.entity_ref', '=', rootRef)
+    const [rootRow] = await this.database<DbFinalEntitiesRow>('final_entities')
+      .where('final_entities.entity_ref', '=', rootRef)
       .select({
         entityJson: 'final_entities.final_entity',
       });
@@ -639,16 +684,13 @@ export class DefaultEntitiesCatalog implements EntitiesCatalog {
       const parentRows = await this.database<DbRefreshStateReferencesRow>(
         'refresh_state_references',
       )
-        .innerJoin<DbRefreshStateRow>('refresh_state', {
-          'refresh_state_references.source_entity_ref':
-            'refresh_state.entity_ref',
-        })
         .innerJoin<DbFinalEntitiesRow>('final_entities', {
-          'refresh_state.entity_id': 'final_entities.entity_id',
+          'refresh_state_references.source_entity_ref':
+            'final_entities.entity_ref',
         })
         .where('refresh_state_references.target_entity_ref', '=', currentRef)
         .select({
-          parentEntityRef: 'refresh_state.entity_ref',
+          parentEntityRef: 'final_entities.entity_ref',
           parentEntityJson: 'final_entities.final_entity',
         });
 

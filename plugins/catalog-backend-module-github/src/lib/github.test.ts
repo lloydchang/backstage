@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { setupRequestMockHandlers } from '@backstage/backend-test-utils';
+import { registerMswTestHooks } from '@backstage/backend-test-utils';
 import { GroupEntity, UserEntity } from '@backstage/catalog-model';
 import { graphql as graphqlOctokit } from '@octokit/graphql';
 import { graphql as graphqlMsw } from 'msw';
@@ -39,7 +39,7 @@ describe('github', () => {
   const graphql = graphqlOctokit.defaults({ request: { fetch } });
 
   const server = setupServer();
-  setupRequestMockHandlers(server);
+  registerMswTestHooks(server);
 
   describe('getOrganizationUsers using defaultUserMapper', () => {
     it('reads members', async () => {
@@ -229,7 +229,7 @@ describe('github', () => {
 
     it('reads teams', async () => {
       const output = {
-        groups: [
+        teams: [
           expect.objectContaining({
             metadata: expect.objectContaining({
               name: 'team',
@@ -329,7 +329,7 @@ describe('github', () => {
 
     it('reads teams', async () => {
       const output = {
-        groups: [
+        teams: [
           expect.objectContaining({
             metadata: expect.objectContaining({
               name: 'Team-custom',
@@ -409,7 +409,7 @@ describe('github', () => {
       };
 
       const output = {
-        groups: [
+        teams: [
           expect.objectContaining({
             metadata: expect.objectContaining({
               name: 'Team-custom',
@@ -444,7 +444,7 @@ describe('github', () => {
         customTeamTransformer,
       );
 
-      expect(teams.groups).toHaveLength(1);
+      expect(teams.teams).toHaveLength(1);
       expect(teams).toEqual(output);
     });
   });

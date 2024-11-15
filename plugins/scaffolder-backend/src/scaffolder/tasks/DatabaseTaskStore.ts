@@ -15,26 +15,36 @@
  */
 
 import { JsonObject } from '@backstage/types';
-import {
-  PluginDatabaseManager,
-  resolvePackagePath,
-} from '@backstage/backend-common';
+import { PluginDatabaseManager } from '@backstage/backend-common';
+import { resolvePackagePath } from '@backstage/backend-plugin-api';
 import { ConflictError, NotFoundError } from '@backstage/errors';
 import { Knex } from 'knex';
 import { v4 as uuid } from 'uuid';
 import {
-  SerializedTaskEvent,
-  SerializedTask,
-  TaskStatus,
-  TaskEventType,
   TaskStore,
-  TaskStoreEmitOptions,
-  TaskStoreListEventsOptions,
   TaskStoreCreateTaskOptions,
   TaskStoreCreateTaskResult,
+  TaskStoreEmitOptions,
+  TaskStoreListEventsOptions,
+  TaskStoreRecoverTaskOptions,
   TaskStoreShutDownTaskOptions,
 } from './types';
-import { DateTime } from 'luxon';
+import {
+  SerializedTask,
+  SerializedTaskEvent,
+  TaskEventType,
+  TaskSecrets,
+  TaskStatus,
+} from '@backstage/plugin-scaffolder-node';
+import { DateTime, Duration } from 'luxon';
+import { TaskRecovery, TaskSpec } from '@backstage/plugin-scaffolder-common';
+import { trimEventsTillLastRecovery } from './taskRecoveryHelper';
+import { intervalFromNowTill } from './dbUtil';
+import {
+  restoreWorkspace,
+  serializeWorkspace,
+} from '@backstage/plugin-scaffolder-node/alpha';
+import { flattenParams } from '../../service/helpers';
 
 const migrationsDir = resolvePackagePath(
   '@backstage/plugin-scaffolder-backend',
@@ -45,10 +55,12 @@ export type RawDbTaskRow = {
   id: string;
   spec: string;
   status: TaskStatus;
+  state?: string;
   last_heartbeat_at?: string;
   created_at: string;
   created_by: string | null;
   secrets?: string | null;
+  workspace?: Buffer;
 };
 
 export type RawDbTaskEventRow = {
@@ -69,7 +81,7 @@ export type DatabaseTaskStoreOptions = {
 };
 
 /**
- * Typeguard to help DatabaseTaskStore understand when database is PluginDatabaseManager vs. when database is a Knex instance.
+ * Type guard to help DatabaseTaskStore understand when database is PluginDatabaseManager vs. when database is a Knex instance.
  *
  * * @public
  */
@@ -81,7 +93,13 @@ function isPluginDatabaseManager(
 
 const parseSqlDateToIsoString = <T>(input: T): T | string => {
   if (typeof input === 'string') {
-    return DateTime.fromSQL(input, { zone: 'UTC' }).toISO();
+    const parsed = DateTime.fromSQL(input, { zone: 'UTC' });
+    if (!parsed.isValid) {
+      throw new Error(
+        `Failed to parse database timestamp '${input}', ${parsed.invalidReason}: ${parsed.invalidExplanation}`,
+      );
+    }
+    return parsed.toISO()!;
   }
 
   return input;
@@ -104,6 +122,30 @@ export class DatabaseTaskStore implements TaskStore {
     await this.runMigrations(database, client);
 
     return new DatabaseTaskStore(client);
+  }
+
+  private isRecoverableTask(spec: TaskSpec): boolean {
+    return ['startOver'].includes(
+      spec.EXPERIMENTAL_recovery?.EXPERIMENTAL_strategy ?? 'none',
+    );
+  }
+
+  private parseSpec({ spec, id }: { spec: string; id: string }): TaskSpec {
+    try {
+      return JSON.parse(spec);
+    } catch (error) {
+      throw new Error(`Failed to parse spec of task '${id}', ${error}`);
+    }
+  }
+
+  private parseTaskSecrets(taskRow: RawDbTaskRow): TaskSecrets | undefined {
+    try {
+      return taskRow.secrets ? JSON.parse(taskRow.secrets) : undefined;
+    } catch (error) {
+      throw new Error(
+        `Failed to parse secrets of task '${taskRow.id}', ${error}`,
+      );
+    }
   }
 
   private static async getClient(
@@ -141,16 +183,59 @@ export class DatabaseTaskStore implements TaskStore {
 
   async list(options: {
     createdBy?: string;
-  }): Promise<{ tasks: SerializedTask[] }> {
-    const queryBuilder = this.db<RawDbTaskRow>('tasks');
+    status?: TaskStatus;
+    filters?: {
+      createdBy?: string | string[];
+      status?: TaskStatus | TaskStatus[];
+    };
+    pagination?: {
+      limit?: number;
+      offset?: number;
+    };
+    order?: { order: 'asc' | 'desc'; field: string }[];
+  }): Promise<{ tasks: SerializedTask[]; totalTasks?: number }> {
+    const { createdBy, status, pagination, order, filters } = options ?? {};
+    const queryBuilder = this.db<RawDbTaskRow & { count: number }>('tasks');
 
-    if (options.createdBy) {
-      queryBuilder.where({
-        created_by: options.createdBy,
-      });
+    if (createdBy || filters?.createdBy) {
+      const arr: string[] = flattenParams<string>(
+        createdBy,
+        filters?.createdBy,
+      );
+      queryBuilder.whereIn('created_by', [...new Set(arr)]);
     }
 
-    const results = await queryBuilder.orderBy('created_at', 'desc').select();
+    if (status || filters?.status) {
+      const arr: TaskStatus[] = flattenParams<TaskStatus>(
+        status,
+        filters?.status,
+      );
+      queryBuilder.whereIn('status', [...new Set(arr)]);
+    }
+
+    const countQuery = queryBuilder.clone();
+    countQuery.count('tasks.id', { as: 'count' });
+
+    if (order) {
+      order.forEach(f => {
+        queryBuilder.orderBy(f.field, f.order);
+      });
+    } else {
+      queryBuilder.orderBy('created_at', 'desc');
+    }
+
+    if (pagination?.limit !== undefined) {
+      queryBuilder.limit(pagination.limit);
+    }
+
+    if (pagination?.offset !== undefined) {
+      queryBuilder.offset(pagination.offset);
+    }
+
+    const [results, [{ count }]] = await Promise.all([
+      queryBuilder.select(),
+      countQuery,
+    ]);
 
     const tasks = results.map(result => ({
       id: result.id,
@@ -161,7 +246,7 @@ export class DatabaseTaskStore implements TaskStore {
       createdAt: parseSqlDateToIsoString(result.created_at),
     }));
 
-    return { tasks };
+    return { tasks, totalTasks: count };
   }
 
   async getTask(taskId: string): Promise<SerializedTask> {
@@ -174,6 +259,7 @@ export class DatabaseTaskStore implements TaskStore {
     try {
       const spec = JSON.parse(result.spec);
       const secrets = result.secrets ? JSON.parse(result.secrets) : undefined;
+      const state = result.state ? JSON.parse(result.state).state : undefined;
       return {
         id: result.id,
         spec,
@@ -182,6 +268,7 @@ export class DatabaseTaskStore implements TaskStore {
         createdAt: parseSqlDateToIsoString(result.created_at),
         createdBy: result.created_by ?? undefined,
         secrets,
+        state,
       };
     } catch (error) {
       throw new Error(`Failed to parse spec of task '${taskId}', ${error}`);
@@ -215,34 +302,42 @@ export class DatabaseTaskStore implements TaskStore {
         return undefined;
       }
 
+      const spec = this.parseSpec(task);
+
       const updateCount = await tx<RawDbTaskRow>('tasks')
         .where({ id: task.id, status: 'open' })
         .update({
           status: 'processing',
           last_heartbeat_at: this.db.fn.now(),
-          // remove the secrets when moving to processing state.
-          secrets: null,
+          // remove the secrets for non-recoverable tasks when moving to processing state.
+          secrets: this.isRecoverableTask(spec) ? task.secrets : null,
         });
 
       if (updateCount < 1) {
         return undefined;
       }
 
-      try {
-        const spec = JSON.parse(task.spec);
-        const secrets = task.secrets ? JSON.parse(task.secrets) : undefined;
-        return {
-          id: task.id,
-          spec,
-          status: 'processing',
-          lastHeartbeatAt: task.last_heartbeat_at,
-          createdAt: task.created_at,
-          createdBy: task.created_by ?? undefined,
-          secrets,
-        };
-      } catch (error) {
-        throw new Error(`Failed to parse spec of task '${task.id}', ${error}`);
-      }
+      const getState = () => {
+        try {
+          return task.state ? JSON.parse(task.state).state : undefined;
+        } catch (error) {
+          throw new Error(
+            `Failed to parse state of the task '${task.id}', ${error}`,
+          );
+        }
+      };
+
+      const secrets = this.parseTaskSecrets(task);
+      return {
+        id: task.id,
+        spec,
+        status: 'processing',
+        lastHeartbeatAt: task.last_heartbeat_at,
+        createdAt: task.created_at,
+        createdBy: task.created_by ?? undefined,
+        secrets,
+        state: getState(),
+      };
     });
   }
 
@@ -258,22 +353,15 @@ export class DatabaseTaskStore implements TaskStore {
   }
 
   async listStaleTasks(options: { timeoutS: number }): Promise<{
-    tasks: { taskId: string }[];
+    tasks: { taskId: string; recovery?: TaskRecovery }[];
   }> {
     const { timeoutS } = options;
-
+    const heartbeatInterval = intervalFromNowTill(timeoutS, this.db);
     const rawRows = await this.db<RawDbTaskRow>('tasks')
       .where('status', 'processing')
-      .andWhere(
-        'last_heartbeat_at',
-        '<=',
-        this.db.client.config.client.includes('sqlite3')
-          ? this.db.raw(`datetime('now', ?)`, [`-${timeoutS} seconds`])
-          : this.db.raw(`? - interval '${timeoutS} seconds'`, [
-              this.db.fn.now(),
-            ]),
-      );
+      .andWhere('last_heartbeat_at', '<=', heartbeatInterval);
     const tasks = rawRows.map(row => ({
+      recovery: (JSON.parse(row.spec) as TaskSpec).EXPERIMENTAL_recovery,
       taskId: row.id,
     }));
     return { tasks };
@@ -286,7 +374,7 @@ export class DatabaseTaskStore implements TaskStore {
   }): Promise<void> {
     const { taskId, status, eventBody } = options;
 
-    let oldStatus: string;
+    let oldStatus: TaskStatus;
     if (['failed', 'completed', 'cancelled'].includes(status)) {
       oldStatus = 'processing';
     } else {
@@ -311,6 +399,7 @@ export class DatabaseTaskStore implements TaskStore {
           .where(criteria)
           .update({
             status,
+            secrets: null,
           });
 
         if (updateCount !== 1) {
@@ -366,10 +455,36 @@ export class DatabaseTaskStore implements TaskStore {
     });
   }
 
+  async getTaskState({ taskId }: { taskId: string }): Promise<
+    | {
+        state: JsonObject;
+      }
+    | undefined
+  > {
+    const [result] = await this.db<RawDbTaskRow>('tasks')
+      .where({ id: taskId })
+      .select('state');
+    return result.state ? JSON.parse(result.state) : undefined;
+  }
+
+  async saveTaskState(options: {
+    taskId: string;
+    state?: JsonObject;
+  }): Promise<void> {
+    if (options.state) {
+      const serializedState = JSON.stringify({ state: options.state });
+      await this.db<RawDbTaskRow>('tasks')
+        .where({ id: options.taskId })
+        .update({
+          state: serializedState,
+        });
+    }
+  }
+
   async listEvents(
     options: TaskStoreListEventsOptions,
   ): Promise<{ events: SerializedTaskEvent[] }> {
-    const { taskId, after } = options;
+    const { isTaskRecoverable, taskId, after } = options;
     const rawEvents = await this.db<RawDbTaskEventRow>('task_events')
       .where({
         task_id: taskId,
@@ -387,6 +502,7 @@ export class DatabaseTaskStore implements TaskStore {
         const body = JSON.parse(event.body) as JsonObject;
         return {
           id: Number(event.id),
+          isTaskRecoverable,
           taskId,
           body,
           type: event.event_type,
@@ -398,7 +514,8 @@ export class DatabaseTaskStore implements TaskStore {
         );
       }
     });
-    return { events };
+
+    return trimEventsTillLastRecovery(events);
   }
 
   async shutdownTask(options: TaskStoreShutDownTaskOptions): Promise<void> {
@@ -440,6 +557,40 @@ export class DatabaseTaskStore implements TaskStore {
     });
   }
 
+  async rehydrateWorkspace(options: {
+    taskId: string;
+    targetPath: string;
+  }): Promise<void> {
+    const [result] = await this.db<RawDbTaskRow>('tasks')
+      .where({ id: options.taskId })
+      .select('workspace');
+
+    await restoreWorkspace({
+      path: options.targetPath,
+      buffer: result.workspace,
+    });
+  }
+
+  async cleanWorkspace({ taskId }: { taskId: string }): Promise<void> {
+    await this.db('tasks').where({ id: taskId }).update({
+      workspace: null,
+    });
+  }
+
+  async serializeWorkspace(options: {
+    path: string;
+    taskId: string;
+  }): Promise<void> {
+    if (options.path) {
+      const workspace = (await serializeWorkspace(options)).contents;
+      await this.db<RawDbTaskRow>('tasks')
+        .where({ id: options.taskId })
+        .update({
+          workspace,
+        });
+    }
+  }
+
   async cancelTask(
     options: TaskStoreEmitOptions<{ message: string } & JsonObject>,
   ): Promise<void> {
@@ -450,5 +601,81 @@ export class DatabaseTaskStore implements TaskStore {
       event_type: 'cancelled',
       body: serializedBody,
     });
+  }
+
+  async retryTask?(options: { taskId: string }): Promise<void> {
+    await this.db.transaction(async tx => {
+      const result = await tx<RawDbTaskRow>('tasks')
+        .where('id', options.taskId)
+        .update(
+          {
+            status: 'open',
+            last_heartbeat_at: this.db.fn.now(),
+          },
+          ['id', 'spec'],
+        );
+
+      for (const { id, spec } of result) {
+        const taskSpec = JSON.parse(spec as string) as TaskSpec;
+
+        /**
+         * Once task is picked up, all event types are replayed.
+         * We have to remove cancelled or completion event_type as these are as actions for frontend to perform.
+         * In contrary, we send 'recovered' event_type to reset the state on the frontend side.
+         *
+         */
+        await tx<RawDbTaskEventRow>('task_events')
+          .where('task_id', id)
+          .andWhere(q => q.whereIn('event_type', ['cancelled', 'completion']))
+          .del();
+
+        await tx<RawDbTaskEventRow>('task_events').insert({
+          task_id: id,
+          event_type: 'recovered',
+          body: JSON.stringify({
+            recoverStrategy:
+              taskSpec.EXPERIMENTAL_recovery?.EXPERIMENTAL_strategy ?? 'none',
+          }),
+        });
+      }
+    });
+  }
+
+  async recoverTasks(
+    options: TaskStoreRecoverTaskOptions,
+  ): Promise<{ ids: string[] }> {
+    const taskIdsToRecover: string[] = [];
+    const timeoutS = Duration.fromObject(options.timeout).as('seconds');
+
+    await this.db.transaction(async tx => {
+      const heartbeatInterval = intervalFromNowTill(timeoutS, this.db);
+
+      const result = await tx<RawDbTaskRow>('tasks')
+        .where('status', 'processing')
+        .andWhere('last_heartbeat_at', '<=', heartbeatInterval)
+        .update(
+          {
+            status: 'open',
+            last_heartbeat_at: this.db.fn.now(),
+          },
+          ['id', 'spec'],
+        );
+
+      taskIdsToRecover.push(...result.map(i => i.id));
+
+      for (const { id, spec } of result) {
+        const taskSpec = JSON.parse(spec as string) as TaskSpec;
+        await tx<RawDbTaskEventRow>('task_events').insert({
+          task_id: id,
+          event_type: 'recovered',
+          body: JSON.stringify({
+            recoverStrategy:
+              taskSpec.EXPERIMENTAL_recovery?.EXPERIMENTAL_strategy ?? 'none',
+          }),
+        });
+      }
+    });
+
+    return { ids: taskIdsToRecover };
   }
 }

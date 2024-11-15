@@ -14,10 +14,7 @@
  * limitations under the License.
  */
 
-import {
-  getVoidLogger,
-  PluginEndpointDiscovery,
-} from '@backstage/backend-common';
+import { loggerToWinstonLogger } from '@backstage/backend-common';
 import { ConfigReader } from '@backstage/config';
 import { ScmIntegrations } from '@backstage/integration';
 import {
@@ -30,6 +27,8 @@ import * as winston from 'winston';
 import { TechDocsCache } from '../cache';
 import { DocsBuilder, shouldCheckForUpdate } from '../DocsBuilder';
 import { DocsSynchronizer, DocsSynchronizerSyncOpts } from './DocsSynchronizer';
+import { mockServices } from '@backstage/backend-test-utils';
+import { DiscoveryService } from '@backstage/backend-plugin-api';
 
 jest.mock('../DocsBuilder');
 jest.useFakeTimers();
@@ -65,7 +64,7 @@ describe('DocsSynchronizer', () => {
     hasDocsBeenGenerated: jest.fn(),
     publish: jest.fn(),
   };
-  const discovery: jest.Mocked<PluginEndpointDiscovery> = {
+  const discovery: jest.Mocked<DiscoveryService> = {
     getBaseUrl: jest.fn(),
     getExternalBaseUrl: jest.fn(),
   };
@@ -97,7 +96,7 @@ describe('DocsSynchronizer', () => {
     docsSynchronizer = new DocsSynchronizer({
       publisher,
       config: new ConfigReader({}),
-      logger: getVoidLogger(),
+      logger: loggerToWinstonLogger(mockServices.logger.mock()),
       buildLogTransport: mockBuildLogTransport,
       scmIntegrations: ScmIntegrations.fromConfig(new ConfigReader({})),
       cache,
@@ -258,7 +257,7 @@ describe('DocsSynchronizer', () => {
       expect(mockResponseHandler.log).toHaveBeenCalledTimes(1);
       expect(mockResponseHandler.log).toHaveBeenCalledWith(
         expect.stringMatching(
-          /error.*: Failed to build the docs page: Some random error/,
+          /error.*: Failed to build the docs page for entity component:default\/test: Some random error/,
         ),
       );
       expect(mockResponseHandler.finish).toHaveBeenCalledTimes(0);
@@ -346,7 +345,7 @@ describe('DocsSynchronizer', () => {
         config: new ConfigReader({
           techdocs: { legacyUseCaseSensitiveTripletPaths: true },
         }),
-        logger: getVoidLogger(),
+        logger: loggerToWinstonLogger(mockServices.logger.mock()),
         buildLogTransport: new winston.transports.Stream({
           stream: new PassThrough(),
         }),

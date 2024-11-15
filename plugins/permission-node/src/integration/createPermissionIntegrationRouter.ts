@@ -24,6 +24,8 @@ import {
   AuthorizeResult,
   DefinitivePolicyDecision,
   IdentifiedPermissionMessage,
+  MetadataResponse as CommonMetadataResponse,
+  MetadataResponseSerializedRule as CommonMetadataResponseSerializedRule,
   Permission,
   PermissionCondition,
   PermissionCriteria,
@@ -109,23 +111,18 @@ export type ApplyConditionsResponse = {
  * converted from a ZodSchema to a JsonSchema.
  *
  * @public
+ * @deprecated Please import from `@backstage/plugin-permission-common` instead.
  */
-export type MetadataResponseSerializedRule = {
-  name: string;
-  description: string;
-  resourceType: string;
-  paramsSchema?: ReturnType<typeof zodToJsonSchema>;
-};
+export type MetadataResponseSerializedRule =
+  CommonMetadataResponseSerializedRule;
 
 /**
  * Response type for the .metadata endpoint.
  *
  * @public
+ * @deprecated Please import from `@backstage/plugin-permission-common` instead.
  */
-export type MetadataResponse = {
-  permissions?: Permission[];
-  rules: MetadataResponseSerializedRule[];
-};
+export type MetadataResponse = CommonMetadataResponse;
 
 const applyConditions = <TResourceType extends string, TResource>(
   criteria: PermissionCriteria<PermissionCondition<TResourceType>>,
@@ -162,7 +159,6 @@ const applyConditions = <TResourceType extends string, TResource>(
 };
 
 /**
-
  * Takes some permission conditions and returns a definitive authorization result
  * on the resource to which they apply.
  *
@@ -482,6 +478,7 @@ export function createPermissionIntegrationRouter<
     },
   );
 
+  // TODO(belugas): Remove this when dropping support to the legacy backend system because setting the error handler manually is no logger required in the new system.
   router.use(errorHandler());
 
   return router;

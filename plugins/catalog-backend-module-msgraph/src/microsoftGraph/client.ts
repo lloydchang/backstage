@@ -64,12 +64,12 @@ export type ODataQuery = {
  * @public
  */
 export type GroupMember =
-  | (MicrosoftGraph.Group & { '@odata.type': '#microsoft.graph.user' })
-  | (MicrosoftGraph.User & { '@odata.type': '#microsoft.graph.group' });
+  | (MicrosoftGraph.Group & { '@odata.type': '#microsoft.graph.group' })
+  | (MicrosoftGraph.User & { '@odata.type': '#microsoft.graph.user' });
 
 /**
  * A HTTP Client that communicates with Microsoft Graph API.
- * Simplify Authentication and API calls to get `User` and `Group` from Azure Active Directory
+ * Simplify Authentication and API calls to get `User` and `Group` from Microsoft Graph
  *
  * Uses `msal-node` for authentication
  *
@@ -216,6 +216,7 @@ export class MicrosoftGraphClient {
   async requestRaw(
     url: string,
     headers?: Record<string, string>,
+    retryCount = 2,
   ): Promise<Response> {
     // Make sure that we always have a valid access token (might be cached)
     const urlObj = new URL(url);
@@ -227,12 +228,19 @@ export class MicrosoftGraphClient {
       throw new Error('Failed to obtain token from Azure Identity');
     }
 
-    return await fetch(url, {
-      headers: {
-        ...headers,
-        Authorization: `Bearer ${token.token}`,
-      },
-    });
+    try {
+      return await fetch(url, {
+        headers: {
+          ...headers,
+          Authorization: `Bearer ${token.token}`,
+        },
+      });
+    } catch (e: any) {
+      if (e?.code === 'ETIMEDOUT' && retryCount > 0) {
+        return this.requestRaw(url, headers, retryCount - 1);
+      }
+      throw e;
+    }
   }
 
   /**
@@ -384,7 +392,7 @@ export class MicrosoftGraphClient {
    * from Graph API
    *
    * @param entityName - type of parent resource, either `User` or `Group`
-   * @param id - The unique identifier for the {@link entityName | entityName} resource
+   * @param id - The unique identifier for the `entityName` resource
    * @param maxSize - Maximum pixel height of the photo
    *
    */

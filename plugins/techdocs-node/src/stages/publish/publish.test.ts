@@ -13,10 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import {
-  getVoidLogger,
-  PluginEndpointDiscovery,
-} from '@backstage/backend-common';
 import { ConfigReader } from '@backstage/config';
 import { Publisher } from './publish';
 import { LocalPublish } from './local';
@@ -24,9 +20,12 @@ import { GoogleGCSPublish } from './googleStorage';
 import { AwsS3Publish } from './awsS3';
 import { AzureBlobStoragePublish } from './azureBlobStorage';
 import { OpenStackSwiftPublish } from './openStackSwift';
+import { mockServices } from '@backstage/backend-test-utils';
+import { PublisherBase } from './types';
+import { DiscoveryService } from '@backstage/backend-plugin-api';
 
-const logger = getVoidLogger();
-const discovery: jest.Mocked<PluginEndpointDiscovery> = {
+const logger = mockServices.logger.mock();
+const discovery: jest.Mocked<DiscoveryService> = {
   getBaseUrl: jest.fn().mockResolvedValueOnce('http://localhost:7007'),
   getExternalBaseUrl: jest.fn(),
 };
@@ -182,5 +181,21 @@ describe('Publisher', () => {
       discovery,
     });
     expect(publisher).toBeInstanceOf(OpenStackSwiftPublish);
+  });
+
+  it('registers a custom publisher if provided', async () => {
+    const mockConfig = new ConfigReader({});
+
+    const customPublisher = {
+      publish: jest.fn(),
+    } as unknown as PublisherBase;
+
+    const publisher = await Publisher.fromConfig(mockConfig, {
+      logger,
+      discovery,
+      customPublisher,
+    });
+
+    expect(publisher).toBe(customPublisher);
   });
 });

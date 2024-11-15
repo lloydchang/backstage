@@ -13,20 +13,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import {
-  getVoidLogger,
-  PluginEndpointDiscovery,
-  TokenManager,
-} from '@backstage/backend-common';
 import { ConfigReader } from '@backstage/config';
 import { TestPipeline } from '@backstage/plugin-search-backend-node';
-import { setupRequestMockHandlers } from '@backstage/backend-test-utils';
+import {
+  mockServices,
+  registerMswTestHooks,
+} from '@backstage/backend-test-utils';
 import { rest } from 'msw';
 import { setupServer } from 'msw/node';
 import { Readable } from 'stream';
 import { ToolDocumentCollatorFactory } from './ToolDocumentCollatorFactory';
+import { DiscoveryService } from '@backstage/backend-plugin-api';
 
-const logger = getVoidLogger();
+const logger = mockServices.logger.mock();
 
 const mockTools = {
   tools: [
@@ -56,18 +55,14 @@ const mockTools = {
 
 describe('ToolDocumentCollatorFactory', () => {
   const config = new ConfigReader({});
-  const mockDiscoveryApi: jest.Mocked<PluginEndpointDiscovery> = {
+  const mockDiscoveryApi: jest.Mocked<DiscoveryService> = {
     getBaseUrl: jest.fn().mockResolvedValue('http://test-backend/api/explore'),
     getExternalBaseUrl: jest.fn(),
   };
-  const mockTokenManager: jest.Mocked<TokenManager> = {
-    getToken: jest.fn().mockResolvedValue({ token: '' }),
-    authenticate: jest.fn(),
-  };
+
   const options = {
     discovery: mockDiscoveryApi,
     logger,
-    tokenManager: mockTokenManager,
   };
 
   it('has expected type', () => {
@@ -80,7 +75,7 @@ describe('ToolDocumentCollatorFactory', () => {
     let collator: Readable;
 
     const worker = setupServer();
-    setupRequestMockHandlers(worker);
+    registerMswTestHooks(worker);
 
     beforeEach(async () => {
       factory = ToolDocumentCollatorFactory.fromConfig(config, options);

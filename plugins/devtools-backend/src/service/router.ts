@@ -13,10 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import {
-  AuthorizeResult,
-  PermissionEvaluator,
-} from '@backstage/plugin-permission-common';
+import { AuthorizeResult } from '@backstage/plugin-permission-common';
 import {
   devToolsConfigReadPermission,
   devToolsExternalDependenciesReadPermission,
@@ -24,29 +21,46 @@ import {
   devToolsPermissions,
 } from '@backstage/plugin-devtools-common';
 
-import { Config } from '@backstage/config';
 import { DevToolsBackendApi } from '../api';
-import { Logger } from 'winston';
 import { NotAllowedError } from '@backstage/errors';
 import Router from 'express-promise-router';
-import { errorHandler } from '@backstage/backend-common';
+import {
+  createLegacyAuthAdapters,
+  errorHandler,
+} from '@backstage/backend-common';
 import express from 'express';
-import { getBearerTokenFromAuthorizationHeader } from '@backstage/plugin-auth-node';
 import { createPermissionIntegrationRouter } from '@backstage/plugin-permission-node';
+import {
+  DiscoveryService,
+  HttpAuthService,
+  LoggerService,
+  PermissionsService,
+  RootConfigService,
+} from '@backstage/backend-plugin-api';
 
-/** @public */
+/**
+ * @public
+ * @deprecated Please migrate to the new backend system as this will be removed in the future.
+ */
 export interface RouterOptions {
   devToolsBackendApi?: DevToolsBackendApi;
-  logger: Logger;
-  config: Config;
-  permissions: PermissionEvaluator;
+  logger: LoggerService;
+  config: RootConfigService;
+  permissions: PermissionsService;
+  discovery: DiscoveryService;
+  httpAuth?: HttpAuthService;
 }
 
-/** @public */
+/**
+ * @deprecated Please migrate to the new backend system as this will be removed in the future.
+ * @public
+ * */
 export async function createRouter(
   options: RouterOptions,
 ): Promise<express.Router> {
   const { logger, config, permissions } = options;
+
+  const { httpAuth } = createLegacyAuthAdapters(options);
 
   const devToolsBackendApi =
     options.devToolsBackendApi || new DevToolsBackendApi(logger, config);
@@ -64,16 +78,10 @@ export async function createRouter(
   });
 
   router.get('/info', async (req, response) => {
-    const token = getBearerTokenFromAuthorizationHeader(
-      req.header('authorization'),
-    );
-
     const decision = (
       await permissions.authorize(
         [{ permission: devToolsInfoReadPermission }],
-        {
-          token,
-        },
+        { credentials: await httpAuth.credentials(req) },
       )
     )[0];
 
@@ -87,16 +95,10 @@ export async function createRouter(
   });
 
   router.get('/config', async (req, response) => {
-    const token = getBearerTokenFromAuthorizationHeader(
-      req.header('authorization'),
-    );
-
     const decision = (
       await permissions.authorize(
         [{ permission: devToolsConfigReadPermission }],
-        {
-          token,
-        },
+        { credentials: await httpAuth.credentials(req) },
       )
     )[0];
 
@@ -110,16 +112,10 @@ export async function createRouter(
   });
 
   router.get('/external-dependencies', async (req, response) => {
-    const token = getBearerTokenFromAuthorizationHeader(
-      req.header('authorization'),
-    );
-
     const decision = (
       await permissions.authorize(
         [{ permission: devToolsExternalDependenciesReadPermission }],
-        {
-          token,
-        },
+        { credentials: await httpAuth.credentials(req) },
       )
     )[0];
 
